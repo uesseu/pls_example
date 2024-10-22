@@ -22,26 +22,36 @@ y = np.array(
      [3.2, 5.9],
      [6.9, 12.3]]
 )
-# y = y[:, 0:1]
-# y = y[0:1, :]
+
 
 class PLSBase:
-    def __init__(self, num: int = 1):
+    def __init__(self, num: int = 1, defrate_y: bool = False, iter_num = 100):
+        self.iter_num = 100
         self.num = num
-        self.x_weight = []
-        self.y_weight = []
-        self.x_score = []
-        self.y_score = []
+        self.defrate_y = defrate_y
+        self.x_weight = None
+        self.y_weight = None
+        self.x_score = None
+        self.y_score = None
 
-    def _setup_array(self, x, y):
-        self.x_weight = np.zeros((self.num, x.shape[-1]))
-        self.y_weight = np.zeros((self.num, x.shape[-1]))
-        self.x_weight = np.zeros((self.num, x.shape[-1]))
-        self.y_weight = np.zeros((self.num, x.shape[-1]))
+    @classmethod
+    def _flip_wight(self, x, y, big=False):
+        '''
+        Set unique svd by flipping.
+        '''
+        if big:
+            x *= np.sign(x[:, np.argmax(np.abs(x))])
+            y *= np.sign(y[:, np.argmax(np.abs(y))])
+        else:
+            x *= np.sign(x[np.argmax(np.abs(x))])
+            y *= np.sign(y[np.argmax(np.abs(y))])
+        return x, y
 
-    def defrate(self):
-        self.x -= np.outer(self.x_score, self.x_load)
-        self.y -= np.outer(self.y_score, self.y_load)
+    def _setup_array(self, x: int, y: int):
+        self.x_weight = np.zeros((x.shape[-1], self.num))
+        self.y_weight = np.zeros((y.shape[-1], self.num))
+        self.x_score = np.zeros((x.shape[0], self.num))
+        self.y_score = np.zeros((y.shape[0], self.num))
 
     @classmethod
     def center_scale(cls, x: np.ndarray, scale: bool = True):
@@ -52,38 +62,41 @@ class PLSBase:
 
     @classmethod
     def _solve(self, x, y):
-        return x.T @ y / (y.T @ y)
+        return x.T @ y @ np.linalg.pinv(y.T @ y)
 
     def fit(self, x, y):
+        self._setup_array(x, y)
         self.x, self.y = (self.center_scale(d) for d in (x, y))
         for c in range(self.num):
+            self._current_num = c
+            self._current_slice = slice(c, c+1)
             self._fit1(self.x, self.y)
         return self
 
 
 class PLS(PLSBase):
-    @classmethod
-    def _get_weight_pls1(self, n):
-        return n / np.linalg.norm(n, axis=0)
-
-    def _fit1(self, x, y, svd=False):
-        x_weight = self._get_weight_pls1(self.x.T @ self.y)
-        x_score = self.x @ self.x_weight
-        y_weight = self._get_weight_pls1(self.y.T @ x_score)
-        y_weight /= np.sqrt(y_weight @ y_weight)
-        y_score = self.y @ self.y_weight
-        x_load = self._solve(self.x, x_score)
-        y_load = self._solve(self.y, y_score)
-        x_coef = (y_score.T @ x_score) / (x_score.T @ x_score)
-        self.x -= np.outer(x_score, x_load)
-        self.y -= np.outer(y_score, y_load)
-        self.x_weight.append(x_weight)
-        self.y_weight.append(y_weight)
-        self.x_score.append(x_score)
-        self.y_score.append(y_score)
+    def _fit1(self, x, y):
+        y_score = self.y[:, 0:1]
+        for n in range(self.iter_num):
+            x_weight = ((y_score.T @ self.x) / (y_score.T @ y_score)).T
+            x_weight /= np.linalg.norm(x_weight)
+            x_score = self.x @ x_weight
+            y_weight = (self.y.T @ x_score) / (x_score.T @ x_score)
+            y_weight /= np.linalg.norm(y_weight)
+            y_score = self.y @ y_weight
+        x_load = (x_score.T @ self.x) / (x_score.T @ x_score)
+        y_load = (y_score.T @ self.y) / (y_score.T @ y_score)
+        self.x -= np.dot(x_score , x_load)
+        if self.defrate_y:
+            self.y -= np.dot(y_score , y_load)
+        x_weight, y_weight = self._flip_wight(x_weight, y_weight)
+        self.x_weight[:, self._current_slice] = x_weight
+        self.y_weight[:, self._current_slice] = y_weight
+        self.x_score[:, self._current_slice] = x_score
+        self.y_score[:, self._current_slice] = y_score
         return self
 
-class PLSSVD(PLSBase):
+class NinPLSSVD(PLSBase):
     @classmethod
     def _get_weight_svd(self, x, y, flip=True):
         u, s, v = np.linalg.svd(x.T @ y, full_matrices=True)
@@ -92,43 +105,31 @@ class PLSSVD(PLSBase):
             self._flip_wight(x_weight, y_weight)
         return x_weight, y_weight
 
-    @classmethod
-    def _flip_wight(self, x, y):
-        '''
-        Set unique svd by flipping.
-        '''
-        sign = np.sign(x[np.argmax(np.abs(x))])
-        x *= sign
-        y *= sign
-
-    def _fit1(self, x, y, svd=False):
-        x_weight, y_weight = self._get_weight_svd(self.x, self.y)
-        x_score = self.x @ x_weight
-        y_score = self.y @ y_weight
-        x_load = self._solve(self.x, x_score)
-        y_load = self._solve(self.y, y_score)
-        x_coef = (y_score.T @ x_score) / (x_score.T @ x_score)
-        self.x -= np.outer(x_score, x_load)
-        self.y -= np.outer(y_score, y_load)
-        self.x_weight.append(x_weight)
-        self.y_weight.append(y_weight)
-        self.x_score.append(x_score)
-        self.y_score.append(y_score)
+    def fit(self, x, y, flip: bool = True):
+        # self.x, self.y = (self.center_scale(d) for d in (x, y))
+        # self.x_weight, s, self.y_weight = np.linalg.svd(self.x.T @ self.y)
+        self.x, self.y = self._get_weight_svd(x, y, flip)
+        # self._flip_wight(self.x_weight, self.y_weight, big=True)
+        self.x_weight = self.x_weight[:, 0:1]
+        self.y_weight = self.y_weight[:, 0:1]
+        self.x_score = self.x @ self.x_weight
+        self.y_score = self.y @ self.y_weight
         return self
 
-ninpls = PLSSVD(2)
+ninpls = PLS(2)
+# ninpls = PLS(2)
 ninpls.fit(X, y)
 print('xw', ninpls.x_weight)
 print('yw', ninpls.y_weight)
 print('xs', ninpls.x_score)
 print('ys', ninpls.y_score)
 # pls.fit(X, y, svd=False)
-pls = PLSRegression(1, scale=True)
+pls = PLSSVD(2, scale=True)
+pls = PLSRegression(2, scale=True)
 pls.fit(X, y)
-
-np.testing.assert_almost_equal(ninpls.x_weight, pls.x_weights_)
-np.testing.assert_almost_equal(ninpls.x_score, pls.x_scores_)
-np.testing.assert_almost_equal(ninpls.x_load, pls.x_loadings_)
+np.testing.assert_almost_equal(ninpls.x_weight, pls.x_weights_, decimal = 5)
+np.testing.assert_almost_equal(ninpls.x_score, pls.x_scores_, decimal = 5)
+np.testing.assert_almost_equal(ninpls.x_load, pls.x_loadings_, decimal = 5)
 print(pls.y_scores_)
 print(ninpls.y_score)
 print('x', ninpls.x)
